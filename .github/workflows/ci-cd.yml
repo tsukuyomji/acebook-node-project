@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   ci:
@@ -74,3 +75,50 @@ jobs:
           fi
 
           npm run test:integration
+
+      - name: Configure AWS credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::664047078509:role/anton-acebook-github-actions-role
+          aws-region: eu-west-2
+          allowed-account-ids: 664047078509
+          role-session-name: acebook-${{ github.run_id }}
+
+      - name: Package and deploy Acebook
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+
+          REVISION_FILE="acebook-${GITHUB_SHA}.zip"
+          S3_KEY="revisions/${REVISION_FILE}"
+
+          git archive \
+            --format=zip \
+            --output="${REVISION_FILE}" \
+            HEAD
+
+          aws s3 cp \
+            "${REVISION_FILE}" \
+            "s3://anton-acebook-eu-west-2/${S3_KEY}"
+
+          DEPLOYMENT_ID="$(
+            aws deploy create-deployment \
+              --application-name anton-acebook \
+              --deployment-group-name anton-acebook-deployment-group \
+              --deployment-config-name CodeDeployDefault.AllAtOnce \
+              --description "GitHub Actions deployment ${GITHUB_SHA}" \
+              --s3-location "bucket=anton-acebook-eu-west-2,key=${S3_KEY},bundleType=zip" \
+              --query deploymentId \
+              --output text
+          )"
+
+          echo "Created CodeDeploy deployment: ${DEPLOYMENT_ID}"
+
+          aws deploy wait deployment-successful \
+            --deployment-id "${DEPLOYMENT_ID}"
+
+          aws deploy get-deployment \
+            --deployment-id "${DEPLOYMENT_ID}" \
+            --query "deploymentInfo.status" \
+            --output text
